@@ -2,7 +2,7 @@ import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QTableWidget, QTableWidgetItem, 
                              QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QLabel, 
                              QComboBox, QMessageBox, QFileDialog, QHeaderView, QLineEdit,
-                             QDialog, QTextEdit)
+                             QDialog, QTextEdit, QMenu, QFormLayout)
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QTextDocument, QColor, QFont
 from PyQt6.QtPrintSupport import QPrinter
@@ -202,6 +202,8 @@ class MainWindow(QMainWindow):
         # Grid View (5x8)
         self.table = QTableWidget(5, 8)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setVerticalHeaderLabels(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"])
@@ -225,8 +227,8 @@ class MainWindow(QMainWindow):
         self.btnTeacherView.clicked.connect(lambda: self.set_view_mode('teacher'))
         self.btnExportPdf.clicked.connect(self.export_pdf)
         self.btnExportExcel.clicked.connect(self.export_excel)
-        self.sectionCombo.currentTextChanged.connect(self.populate_grid)
-        self.searchEdit.textChanged.connect(self.populate_grid)
+        self.sectionCombo.currentTextChanged.connect(self.on_filter_changed)
+        self.searchEdit.textChanged.connect(self.on_filter_changed)
         
         # State Management
         self.btnGenerate.setEnabled(False)
@@ -236,6 +238,10 @@ class MainWindow(QMainWindow):
         self.btnTeacherView.setEnabled(False)
         self.btnExportPdf.setEnabled(False)
         self.btnExportExcel.setEnabled(False)
+
+    def on_filter_changed(self):
+        self.reschedule_state = None
+        self.populate_grid()
 
     def apply_theme(self):
         self.setStyleSheet("""
@@ -420,6 +426,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Success", "Timetable generated via CSP Backend successfully!")
 
     def set_view_mode(self, mode):
+        self.reschedule_state = None
         self.current_view_mode = mode
         
         self.sectionCombo.blockSignals(True)
@@ -461,7 +468,7 @@ class MainWindow(QMainWindow):
                 for c in range(8):
                     self.table.setItem(r, c, QTableWidgetItem(""))
                     
-            for c in self.timetable_data:
+            for c_idx, c in enumerate(self.timetable_data):
                 if filter_val not in c.get('sections', []):
                     continue
                     
@@ -471,7 +478,7 @@ class MainWindow(QMainWindow):
                     
                 text = f"{c['course_code']}\n{c['room']}\n({c['instructor']})"
                 
-                for slot in c['schedule']:
+                for s_idx_in_schedule, slot in enumerate(c['schedule']):
                     d_idx = days_map.get(slot['day'])
                     s_idx = slot['slot_index']
                     
@@ -483,6 +490,7 @@ class MainWindow(QMainWindow):
                         if search_query:
                             item.setBackground(QColor("#00BCD4"))
                             item.setForeground(QColor("#121212"))
+                        item.setData(Qt.ItemDataRole.UserRole, {"course_idx": c_idx, "slot_index": s_idx_in_schedule})
                         self.table.setItem(d_idx, s_idx, item)
         
         elif self.current_view_mode == 'building':
@@ -522,7 +530,7 @@ class MainWindow(QMainWindow):
                     self.table.setSpan(start_row, 0, len(rooms), 1)
                     
             # Populate courses
-            for c in self.timetable_data:
+            for c_idx, c in enumerate(self.timetable_data):
                 if c.get('building') != filter_val:
                     continue
                     
@@ -532,7 +540,7 @@ class MainWindow(QMainWindow):
                     
                 text = f"{c['course_code']}\n{', '.join(c.get('sections', []))}\n({c['instructor']})"
                 
-                for slot in c['schedule']:
+                for s_idx_in_schedule, slot in enumerate(c['schedule']):
                     if slot['day'] not in days_map or c['room'] not in rooms:
                         continue
                         
@@ -548,6 +556,7 @@ class MainWindow(QMainWindow):
                     if search_query:
                         item.setBackground(QColor("#00BCD4"))
                         item.setForeground(QColor("#121212"))
+                    item.setData(Qt.ItemDataRole.UserRole, {"course_idx": c_idx, "slot_index": s_idx_in_schedule})
                     self.table.setItem(r, s_idx, item)
 
         elif self.current_view_mode == 'teacher':
@@ -562,7 +571,7 @@ class MainWindow(QMainWindow):
                 for c in range(8):
                     self.table.setItem(r, c, QTableWidgetItem(""))
                     
-            for c in self.timetable_data:
+            for c_idx, c in enumerate(self.timetable_data):
                 inst_list = c.get('instructors', [c.get('instructor')])
                 if filter_val not in inst_list:
                     continue
@@ -573,7 +582,7 @@ class MainWindow(QMainWindow):
                     
                 text = f"{c['course_code']}\n{c.get('room', '')}\n({', '.join(c.get('sections', []))})"
                 
-                for slot in c['schedule']:
+                for s_idx_in_schedule, slot in enumerate(c['schedule']):
                     d_idx = days_map.get(slot['day'])
                     s_idx = slot['slot_index']
                     
@@ -585,7 +594,135 @@ class MainWindow(QMainWindow):
                         if search_query:
                             item.setBackground(QColor("#00BCD4"))
                             item.setForeground(QColor("#121212"))
+                        item.setData(Qt.ItemDataRole.UserRole, {"course_idx": c_idx, "slot_index": s_idx_in_schedule})
                         self.table.setItem(d_idx, s_idx, item)
+
+        if getattr(self, 'reschedule_state', None):
+            c_idx = self.reschedule_state['course_idx']
+            s_idx = self.reschedule_state['slot_index']
+            course = self.timetable_data[c_idx]
+            clicked_slot = course['schedule'][s_idx]
+            is_lab = course.get('is_lab', False) or str(course.get('course_code', '')).upper().endswith('L')
+            
+            if is_lab:
+                related_slots = [s for s in course['schedule'] if s['day'] == clicked_slot['day']]
+                related_slots.sort(key=lambda x: x['slot_index'])
+                num_slots = len(related_slots)
+            else:
+                num_slots = 1
+                
+            my_teachers = set(course.get('instructors', []))
+            if not my_teachers and course.get('instructor'):
+                my_teachers = set([course.get('instructor')])
+            my_sections = set(course.get('sections', []))
+            
+            orig_room = course.get('room')
+            if self.current_view_mode == 'building':
+                rooms = sorted(list(set(c['room'] for c in self.timetable_data if c.get('building') == filter_val)))
+            else:
+                rooms = []
+
+            def check_clash(day, sl_idx, room, exclude_c_idx):
+                t_clash, s_clash, r_clash = False, False, False
+                for i, other_c in enumerate(self.timetable_data):
+                    if i == exclude_c_idx: continue
+                    for s in other_c['schedule']:
+                        if s['day'] == day and s['slot_index'] == sl_idx:
+                            if room and other_c.get('room') == room: r_clash = True
+                            c_t = set(other_c.get('instructors', []))
+                            if not c_t and other_c.get('instructor'): c_t.add(other_c.get('instructor'))
+                            if my_teachers.intersection(c_t): t_clash = True
+                            c_s = set(other_c.get('sections', []))
+                            if my_sections.intersection(c_s): s_clash = True
+                return t_clash, s_clash, r_clash
+
+            for row in range(self.table.rowCount()):
+                for col in range(self.table.columnCount()):
+                    if self.current_view_mode == 'building' and col < 2: continue
+                    
+                    if self.current_view_mode == 'building':
+                        if not rooms: continue
+                        day_name = days_list[row // len(rooms)]
+                        room_name = rooms[row % len(rooms)]
+                        slot_index = col - 2
+                        rooms_to_check = [room_name]
+                    else:
+                        day_name = days_list[row]
+                        slot_index = col
+                        room_name = orig_room
+                        
+                        rooms_list = self.custom_rooms if self.custom_rooms else self.integrator.get_default_rooms()
+                        rooms_to_check = [r.name for r in rooms_list if r.is_lab == is_lab]
+                        
+                    out_of_bounds = False
+                    t_clash_total, s_clash_total = False, False
+                    all_rooms_occupied = False
+                    best_room = None
+                    
+                    if slot_index + num_slots > 8:
+                        out_of_bounds = True
+                    else:
+                        for offset in range(num_slots):
+                            tc, sc, _ = check_clash(day_name, slot_index + offset, "", c_idx)
+                            if tc: t_clash_total = True
+                            if sc: s_clash_total = True
+                            
+                        if not t_clash_total and not s_clash_total:
+                            found_free_room = False
+                            if orig_room in rooms_to_check:
+                                rooms_to_check.remove(orig_room)
+                                rooms_to_check.insert(0, orig_room)
+                                
+                            for r_name in rooms_to_check:
+                                r_clash = False
+                                for offset in range(num_slots):
+                                    _, _, rc = check_clash(day_name, slot_index + offset, r_name, c_idx)
+                                    if rc:
+                                        r_clash = True
+                                        break
+                                if not r_clash:
+                                    found_free_room = True
+                                    best_room = r_name
+                                    break
+                                    
+                            if not found_free_room:
+                                all_rooms_occupied = True
+                            
+                    item = self.table.item(row, col)
+                    if not item:
+                        item = QTableWidgetItem("")
+                        self.table.setItem(row, col, item)
+                        
+                    if out_of_bounds:
+                        item.setBackground(QColor("#4A0000"))
+                        clash_msg = "Out of Bounds"
+                        target_room = orig_room
+                    elif t_clash_total or s_clash_total or all_rooms_occupied:
+                        item.setBackground(QColor("#4A0000"))
+                        msgs = []
+                        if t_clash_total: msgs.append("Teacher Clash")
+                        if s_clash_total: msgs.append("Section Clash")
+                        if all_rooms_occupied: msgs.append("All Rooms Occupied")
+                        clash_msg = " & ".join(msgs)
+                        target_room = orig_room
+                    else:
+                        item.setBackground(QColor("#004A00"))
+                        clash_msg = None
+                        target_room = best_room
+                        
+                    target_data = {
+                        "is_target_cell": True,
+                        "day": day_name,
+                        "slot_index": slot_index,
+                        "room": target_room,
+                        "clash_msg": clash_msg
+                    }
+                    item.setData(Qt.ItemDataRole.UserRole + 1, target_data)
+                    
+                    if clash_msg:
+                        item.setToolTip(clash_msg)
+                    else:
+                        item.setToolTip("Available (Right-click to select room)")
 
     def export_pdf(self):
         if not getattr(self, 'timetable_data', None):
@@ -628,6 +765,147 @@ class MainWindow(QMainWindow):
         except Exception as e:
             import traceback
             QMessageBox.critical(self, "Error", f"Failed to export Excel:\n{traceback.format_exc()}")
+
+    def show_context_menu(self, pos):
+        item = self.table.itemAt(pos)
+        if not item: return
+        data = item.data(Qt.ItemDataRole.UserRole)
+        target_data = item.data(Qt.ItemDataRole.UserRole + 1)
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background-color: #1E1E1E; color: white; border: 1px solid #333; } QMenu::item:selected { background-color: #00BCD4; color: black; }")
+        
+        if getattr(self, 'reschedule_state', None):
+            cancel_action = menu.addAction("Cancel Reschedule")
+            move_action = None
+            if target_data and target_data.get('is_target_cell'):
+                if target_data['clash_msg']:
+                    move_action = menu.addAction(f"Force Move Here ({target_data['clash_msg']})")
+                else:
+                    move_action = menu.addAction("Confirm Move Here")
+            
+            action = menu.exec(self.table.viewport().mapToGlobal(pos))
+            if action == cancel_action:
+                self.reschedule_state = None
+                self.populate_grid()
+            elif move_action and action == move_action:
+                self.handle_move_here(target_data)
+        else:
+            if not data or 'course_idx' not in data: return
+            reschedule_action = menu.addAction("Reschedule this class")
+            action = menu.exec(self.table.viewport().mapToGlobal(pos))
+            if action == reschedule_action:
+                self.reschedule_state = data
+                self.populate_grid()
+
+    def handle_move_here(self, target_data):
+        if target_data['clash_msg']:
+            reply = QMessageBox.question(self, "Force Move", 
+                f"There is a clash: {target_data['clash_msg']}.\nAre you sure you want to force this move?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if reply == QMessageBox.StandardButton.No:
+                return
+                
+        c_idx = self.reschedule_state['course_idx']
+        s_idx = self.reschedule_state['slot_index']
+        course = self.timetable_data[c_idx]
+        clicked_slot = course['schedule'][s_idx]
+        is_lab = course.get('is_lab', False) or str(course.get('course_code', '')).upper().endswith('L')
+        
+        if is_lab:
+            related_slots = [s for s in course['schedule'] if s['day'] == clicked_slot['day']]
+            related_slots.sort(key=lambda x: x['slot_index'])
+            num_slots = len(related_slots)
+        else:
+            related_slots = [clicked_slot]
+            num_slots = 1
+            
+        new_day = target_data['day']
+        new_start_idx = target_data['slot_index']
+        
+        rooms_list = self.custom_rooms if self.custom_rooms else self.integrator.get_default_rooms()
+        valid_rooms = [r for r in rooms_list if r.is_lab == is_lab]
+        
+        occupied_rooms = set()
+        req_indices = list(range(new_start_idx, new_start_idx + num_slots))
+        for i, c in enumerate(self.timetable_data):
+            if i == c_idx: continue
+            for s in c['schedule']:
+                if s['day'] == new_day and s['slot_index'] in req_indices:
+                    occupied_rooms.add(c.get('room'))
+                    
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select Room")
+        dialog.setStyleSheet("QDialog { background-color: #121212; color: #E0E0E0; } QLabel { color: #E0E0E0; font-size: 14px; }")
+        layout = QVBoxLayout(dialog)
+        
+        layout.addWidget(QLabel(f"Select an available room for {new_day}:"))
+        
+        combo = QComboBox()
+        combo.setStyleSheet("background-color: #1E1E1E; color: white; padding: 5px;")
+        
+        for r in valid_rooms:
+            if r.name not in occupied_rooms:
+                combo.addItem(r.name, userData=r.building)
+                
+        if combo.count() == 0:
+            combo.addItem("No available rooms!")
+            combo.setEnabled(False)
+            
+        target_room_name = target_data.get('room')
+        if target_room_name:
+            idx = combo.findText(target_room_name, Qt.MatchFlag.MatchContains)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+                
+        layout.addWidget(combo)
+        
+        btn_box = QHBoxLayout()
+        btn_ok = QPushButton("Confirm Move")
+        btn_ok.setStyleSheet("background-color: #00BCD4; color: #121212; font-weight: bold; padding: 8px;")
+        if combo.count() == 1 and combo.currentText() == "No available rooms!":
+            btn_ok.setEnabled(False)
+            btn_ok.setStyleSheet("background-color: #555; color: #888; font-weight: bold; padding: 8px;")
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setStyleSheet("background-color: #333; color: white; padding: 8px;")
+        
+        btn_ok.clicked.connect(dialog.accept)
+        btn_cancel.clicked.connect(dialog.reject)
+        
+        btn_box.addWidget(btn_ok)
+        btn_box.addWidget(btn_cancel)
+        layout.addLayout(btn_box)
+        
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+            
+        selected_text = combo.currentText()
+        new_room_name = selected_text.split(" (")[0]
+        new_bldg = combo.currentData()
+        
+        slots_labels = ["8:00-8:50", "9:00-9:50", "10:30-11:20", "11:30-12:20", "12:30-1:20", "2:30-3:20", "3:30-4:20", "4:30-5:20"]
+        
+        for s in related_slots:
+            if s in course['schedule']:
+                course['schedule'].remove(s)
+                
+        new_slots = []
+        for i in range(num_slots):
+            new_idx = new_start_idx + i
+            new_slots.append({'day': new_day, 'time': slots_labels[new_idx], 'slot_index': new_idx})
+            
+        if new_room_name == course.get('room'):
+            course['schedule'].extend(new_slots)
+        else:
+            import copy
+            new_course = copy.deepcopy(course)
+            new_course['room'] = new_room_name
+            new_course['building'] = new_bldg
+            new_course['schedule'] = new_slots
+            self.timetable_data.append(new_course)
+            
+        self.reschedule_state = None
+        self.populate_grid()
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
